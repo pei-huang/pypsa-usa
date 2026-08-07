@@ -65,9 +65,14 @@ LIFETIME_DATA = [
 
 def create_duckdb_instance():
     """Set up DuckDB to read parquet files directly."""
-    duckdb.connect(database=":memory:", read_only=False)
-    # Install httpfs extension to access remote files if needed
-    duckdb.query("INSTALL httpfs;")
+    # Install and load httpfs extension to access remote (S3) files.
+    # `duckdb.query(...)` below uses DuckDB's default in-memory
+    # connection; a prior version of this function created a separate
+    # connection here and discarded it, which did nothing.
+    duckdb.query("INSTALL httpfs; LOAD httpfs;")
+    # See build_powerplants.py:initialize_duckdb for why path-style +
+    # explicit region are needed for PUDL's dotted bucket name.
+    duckdb.query("SET s3_region='us-west-2'; SET s3_url_style='path';")
 
 
 def load_pudl_atb_data(parquet_path: str):

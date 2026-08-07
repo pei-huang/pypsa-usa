@@ -255,18 +255,20 @@ class ReadFERC714(ReadStrategy):
 
     def _read_census_data(self) -> pd.DataFrame:
         """Reads in census data for population weighting using parquet."""
-        duckdb.connect(database=":memory:", read_only=False)
-        duckdb.query("INSTALL httpfs;")
+        duckdb.query("INSTALL httpfs; LOAD httpfs;")
+        # See build_powerplants.py:initialize_duckdb for why path-style +
+        # explicit region are needed for PUDL's dotted bucket name.
+        duckdb.query("SET s3_region='us-west-2'; SET s3_url_style='path';")
 
         parquet_path = snakemake.params.pudl_path
 
         sql = f"""
         SELECT
-        stusps10 as state_abbr,
-        geoid10 as state_id_fips,
-        name10 as state_name,
-        shape as geom
-        FROM read_parquet('{parquet_path}/censusdp1tract.state_2010census_dp1.parquet');
+        state as state_abbr,
+        state_id_fips as state_id_fips,
+        state_name as state_name,
+        geometry as geom
+        FROM read_parquet('{parquet_path}/out_censusdp1tract__states.parquet');
         """
 
         states = (
@@ -1987,8 +1989,10 @@ class AeoElectricityScaler(DemandScaler):
         | 2049 |  ###  |  ###  |
         | 2050 |  ###  |  ###  |
         """
-        duckdb.connect(database=":memory:", read_only=False)
-        duckdb.query("INSTALL httpfs;")
+        duckdb.query("INSTALL httpfs; LOAD httpfs;")
+        # See build_powerplants.py:initialize_duckdb for why path-style +
+        # explicit region are needed for PUDL's dotted bucket name.
+        duckdb.query("SET s3_region='us-west-2'; SET s3_url_style='path';")
 
         query = f"""
         SELECT

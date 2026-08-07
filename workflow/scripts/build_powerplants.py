@@ -13,19 +13,38 @@ logger = logging.getLogger(__name__)
 
 
 def initialize_duckdb():
-    duckdb.connect(database=":memory:", read_only=False)
-    duckdb.query("INSTALL httpfs;")
+    duckdb.query("INSTALL httpfs; LOAD httpfs;")
+    # PUDL's S3 bucket name contains dots ("pudl.catalyst.coop"), which
+    # breaks TLS SNI/cert matching under the default virtual-hosted-style
+    # URL (bucket folded into the hostname, e.g.
+    # pudl.catalyst.coop.s3.amazonaws.com -- doesn't match AWS's
+    # single-level *.s3.amazonaws.com wildcard cert). Path-style avoids
+    # this; path-style also requires an explicit region.
+    duckdb.query("SET s3_region='us-west-2'; SET s3_url_style='path';")
+    # The nationwide array_agg query below has no early row filter and
+    # can exceed DuckDB's default memory_limit on machines with less
+    # RAM. preserve_insertion_order=false is DuckDB's own suggested
+    # mitigation and is safe here: every array_agg already has an
+    # explicit ORDER BY, so output order doesn't depend on physical
+    # row order.
+    duckdb.query("SET preserve_insertion_order=false;")
+    # Still hit DuckDB's auto-detected memory ceiling with insertion-order
+    # preservation off alone (nationwide array_agg over many wide columns,
+    # 4-way join). Fewer parallel threads means less peak intermediate
+    # state per thread -- DuckDB's own second suggestion for this error.
+    # One-time cached build step (not the LP solve), so trading speed
+    # for reliability here is the right call.
+    duckdb.query("SET threads=2;")
 
 
 def load_eia_operable_data(parquet_path: str):
     """Queries the parquet files directly for operable plant data."""
-    return duckdb.query(
-        f"""
+    query = f"""
         WITH monthly_generators AS (
             SELECT
                 plant_id_eia,
                 generator_id,
-                array_agg(unit_heat_rate_mmbtu_per_mwh ORDER BY report_date DESC) FILTER (WHERE unit_heat_rate_mmbtu_per_mwh IS NOT NULL)[1] AS unit_heat_rate_mmbtu_per_mwh
+                arg_max(unit_heat_rate_mmbtu_per_mwh, report_date) FILTER (WHERE unit_heat_rate_mmbtu_per_mwh IS NOT NULL) AS unit_heat_rate_mmbtu_per_mwh
             FROM read_parquet('{parquet_path}/out_eia__monthly_generators.parquet')
             WHERE report_date >= '2023-01-01'
             GROUP BY plant_id_eia, generator_id
@@ -33,30 +52,30 @@ def load_eia_operable_data(parquet_path: str):
         SELECT
             yg.plant_id_eia,
             yg.generator_id,
-            array_agg(yg.plant_name_eia ORDER BY yg.report_date DESC) FILTER (WHERE yg.plant_name_eia IS NOT NULL)[1] AS plant_name_eia,
-            array_agg(yg.capacity_mw ORDER BY yg.report_date DESC) FILTER (WHERE yg.capacity_mw IS NOT NULL)[1] AS capacity_mw,
-            array_agg(yg.summer_capacity_mw ORDER BY yg.report_date DESC) FILTER (WHERE yg.summer_capacity_mw IS NOT NULL)[1] AS summer_capacity_mw,
-            array_agg(yg.winter_capacity_mw ORDER BY yg.report_date DESC) FILTER (WHERE yg.winter_capacity_mw IS NOT NULL)[1] AS winter_capacity_mw,
-            array_agg(yg.minimum_load_mw ORDER BY yg.report_date DESC) FILTER (WHERE yg.minimum_load_mw IS NOT NULL)[1] AS minimum_load_mw,
-            array_agg(yg.energy_source_code_1 ORDER BY yg.report_date DESC) FILTER (WHERE yg.energy_source_code_1 IS NOT NULL)[1] AS energy_source_code_1,
-            array_agg(yg.technology_description ORDER BY yg.report_date DESC) FILTER (WHERE yg.technology_description IS NOT NULL)[1] AS technology_description,
-            array_agg(yg.operational_status ORDER BY yg.report_date DESC) FILTER (WHERE yg.operational_status IS NOT NULL)[1] AS operational_status,
-            array_agg(yg.prime_mover_code ORDER BY yg.report_date DESC) FILTER (WHERE yg.prime_mover_code IS NOT NULL)[1] AS prime_mover_code,
-            array_agg(yg.planned_generator_retirement_date ORDER BY yg.report_date DESC) FILTER (WHERE yg.planned_generator_retirement_date IS NOT NULL)[1] AS planned_generator_retirement_date,
-            array_agg(yg.energy_storage_capacity_mwh ORDER BY yg.report_date DESC) FILTER (WHERE yg.energy_storage_capacity_mwh IS NOT NULL)[1] AS energy_storage_capacity_mwh,
-            array_agg(yg.generator_operating_date ORDER BY yg.report_date DESC) FILTER (WHERE yg.generator_operating_date IS NOT NULL)[1] AS generator_operating_date,
-            array_agg(yg.state ORDER BY yg.report_date DESC) FILTER (WHERE yg.state IS NOT NULL)[1] AS state,
-            array_agg(yg.latitude ORDER BY yg.report_date DESC) FILTER (WHERE yg.latitude IS NOT NULL)[1] AS latitude,
-            array_agg(yg.longitude ORDER BY yg.report_date DESC) FILTER (WHERE yg.longitude IS NOT NULL)[1] AS longitude,
-            array_agg(ges.max_charge_rate_mw ORDER BY ges.report_date DESC) FILTER (WHERE ges.max_charge_rate_mw IS NOT NULL)[1] AS max_charge_rate_mw,
-            array_agg(ges.max_discharge_rate_mw ORDER BY ges.report_date DESC) FILTER (WHERE ges.max_discharge_rate_mw IS NOT NULL)[1] AS max_discharge_rate_mw,
-            array_agg(ges.storage_technology_code_1 ORDER BY ges.report_date DESC) FILTER (WHERE ges.storage_technology_code_1 IS NOT NULL)[1] AS storage_technology_code_1,
-            array_agg(p.nerc_region ORDER BY p.report_date DESC) FILTER (WHERE p.nerc_region IS NOT NULL)[1] AS nerc_region,
-            array_agg(p.balancing_authority_code_eia ORDER BY p.report_date DESC) FILTER (WHERE p.balancing_authority_code_eia IS NOT NULL)[1] AS balancing_authority_code_eia,
-            array_agg(yg.current_planned_generator_operating_date ORDER BY yg.report_date DESC) FILTER (WHERE yg.current_planned_generator_operating_date IS NOT NULL)[1] AS current_planned_generator_operating_date,
-            array_agg(yg.operational_status_code ORDER BY yg.report_date DESC) FILTER (WHERE yg.operational_status_code IS NOT NULL)[1] AS operational_status_code,
-            array_agg(yg.generator_retirement_date ORDER BY yg.report_date DESC) FILTER (WHERE yg.generator_retirement_date IS NOT NULL)[1] AS generator_retirement_date,
-            array_agg(yg.fuel_type_code_pudl ORDER BY yg.report_date DESC) FILTER (WHERE yg.fuel_type_code_pudl IS NOT NULL)[1] AS fuel_type_code_pudl,
+            arg_max(yg.plant_name_eia, yg.report_date) FILTER (WHERE yg.plant_name_eia IS NOT NULL) AS plant_name_eia,
+            arg_max(yg.capacity_mw, yg.report_date) FILTER (WHERE yg.capacity_mw IS NOT NULL) AS capacity_mw,
+            arg_max(yg.summer_capacity_mw, yg.report_date) FILTER (WHERE yg.summer_capacity_mw IS NOT NULL) AS summer_capacity_mw,
+            arg_max(yg.winter_capacity_mw, yg.report_date) FILTER (WHERE yg.winter_capacity_mw IS NOT NULL) AS winter_capacity_mw,
+            arg_max(yg.minimum_load_mw, yg.report_date) FILTER (WHERE yg.minimum_load_mw IS NOT NULL) AS minimum_load_mw,
+            arg_max(yg.energy_source_code_1, yg.report_date) FILTER (WHERE yg.energy_source_code_1 IS NOT NULL) AS energy_source_code_1,
+            arg_max(yg.technology_description, yg.report_date) FILTER (WHERE yg.technology_description IS NOT NULL) AS technology_description,
+            arg_max(yg.operational_status, yg.report_date) FILTER (WHERE yg.operational_status IS NOT NULL) AS operational_status,
+            arg_max(yg.prime_mover_code, yg.report_date) FILTER (WHERE yg.prime_mover_code IS NOT NULL) AS prime_mover_code,
+            arg_max(yg.planned_generator_retirement_date, yg.report_date) FILTER (WHERE yg.planned_generator_retirement_date IS NOT NULL) AS planned_generator_retirement_date,
+            arg_max(yg.energy_storage_capacity_mwh, yg.report_date) FILTER (WHERE yg.energy_storage_capacity_mwh IS NOT NULL) AS energy_storage_capacity_mwh,
+            arg_max(yg.generator_operating_date, yg.report_date) FILTER (WHERE yg.generator_operating_date IS NOT NULL) AS generator_operating_date,
+            arg_max(yg.state, yg.report_date) FILTER (WHERE yg.state IS NOT NULL) AS state,
+            arg_max(yg.latitude, yg.report_date) FILTER (WHERE yg.latitude IS NOT NULL) AS latitude,
+            arg_max(yg.longitude, yg.report_date) FILTER (WHERE yg.longitude IS NOT NULL) AS longitude,
+            arg_max(ges.max_charge_rate_mw, ges.report_date) FILTER (WHERE ges.max_charge_rate_mw IS NOT NULL) AS max_charge_rate_mw,
+            arg_max(ges.max_discharge_rate_mw, ges.report_date) FILTER (WHERE ges.max_discharge_rate_mw IS NOT NULL) AS max_discharge_rate_mw,
+            arg_max(ges.storage_technology_code_1, ges.report_date) FILTER (WHERE ges.storage_technology_code_1 IS NOT NULL) AS storage_technology_code_1,
+            arg_max(p.nerc_region, p.report_date) FILTER (WHERE p.nerc_region IS NOT NULL) AS nerc_region,
+            arg_max(p.balancing_authority_code_eia, p.report_date) FILTER (WHERE p.balancing_authority_code_eia IS NOT NULL) AS balancing_authority_code_eia,
+            arg_max(yg.current_planned_generator_operating_date, yg.report_date) FILTER (WHERE yg.current_planned_generator_operating_date IS NOT NULL) AS current_planned_generator_operating_date,
+            arg_max(yg.operational_status_code, yg.report_date) FILTER (WHERE yg.operational_status_code IS NOT NULL) AS operational_status_code,
+            arg_max(yg.generator_retirement_date, yg.report_date) FILTER (WHERE yg.generator_retirement_date IS NOT NULL) AS generator_retirement_date,
+            arg_max(yg.fuel_type_code_pudl, yg.report_date) FILTER (WHERE yg.fuel_type_code_pudl IS NOT NULL) AS fuel_type_code_pudl,
             first(mg.unit_heat_rate_mmbtu_per_mwh) AS unit_heat_rate_mmbtu_per_mwh
         FROM read_parquet('{parquet_path}/out_eia__yearly_generators.parquet') yg
         LEFT JOIN read_parquet('{parquet_path}/core_eia860__scd_generators_energy_storage.parquet') ges
@@ -69,12 +88,22 @@ def load_eia_operable_data(parquet_path: str):
             yg.operational_status_code IN ('RE','OP', 'SC', 'SB', 'CO' ,'U', 'V', 'TS', 'T')
             AND yg.report_date >= '2023-01-01'
         GROUP BY yg.plant_id_eia, yg.generator_id
-    """,
-    ).to_df()
+    """
+    # Plain .to_df(): the arg_max rewrite above means this query has no
+    # more LIST-typed (array_agg) columns, so there's nothing left to
+    # box expensively -- .to_arrow_table().to_pandas() was tried here
+    # for that reason but caused a real regression (PyArrow's default
+    # date handling produces `object` dtype instead of datetime64,
+    # breaking .dt accessor calls downstream) for no remaining benefit.
+    return duckdb.query(query).to_df()
 
 
 def load_heat_rates_data(parquet_path: str, start_date: str, end_date: str):
     """Queries the parquet files for heat rate and fuel cost data within the specified date range."""
+    # Self-contained: build_fuel_prices.py imports and calls this
+    # function directly without calling initialize_duckdb() first, so
+    # the S3 path-style/region config must be (re-)applied here too.
+    initialize_duckdb()
     query = f"""
     WITH monthly_generators AS (
         SELECT
