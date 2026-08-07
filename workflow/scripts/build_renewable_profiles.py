@@ -32,10 +32,11 @@ def get_renewable_snapshots(config, year):
         end_month = ren_sns_config.get("end_month", 12)
         end_day = ren_sns_config.get("end_day", 31)
         end_inclusive = ren_sns_config.get("end_inclusive", False)
+        end_time = " 23:00:00" if end_inclusive else ""
 
         snapshots_config = {
             "start": f"{year}-{start_month:02d}-{start_day:02d}",
-            "end": f"{year}-{end_month:02d}-{end_day:02d}",
+            "end": f"{year}-{end_month:02d}-{end_day:02d}{end_time}",
             "inclusive": "both" if end_inclusive else "left",
         }
         logger.info(
@@ -43,7 +44,7 @@ def get_renewable_snapshots(config, year):
             f"{snapshots_config['start']} to {snapshots_config['end']} "
             f"({'inclusive' if end_inclusive else 'exclusive'} end)",
         )
-        return get_snapshots(snapshots_config)
+        return get_snapshots(snapshots_config, drop_leap_day=False)
     else:
         # Old format fallback
         snapshots_config = {
@@ -52,7 +53,7 @@ def get_renewable_snapshots(config, year):
             "inclusive": "left",
         }
         logger.info(f"Using renewable snapshots for full year {year}")
-        return get_snapshots(snapshots_config)
+        return get_snapshots(snapshots_config, drop_leap_day=False)
 
 
 def plot_data(data):
@@ -107,9 +108,9 @@ if __name__ == "__main__":
     sns = get_snapshots(snakemake.params.snapshots)
 
     regions = gpd.read_file(snakemake.input.regions)
-    assert "x" in regions.columns and "y" in regions.columns, (
-        f"List of regions in {snakemake.input.regions} is empty, please disable the corresponding renewable technology"
-    )
+    assert (
+        "x" in regions.columns and "y" in regions.columns
+    ), f"List of regions in {snakemake.input.regions} is empty, please disable the corresponding renewable technology"
     # do not pull up, set_index does not work if geo dataframe is empty
     regions = regions.set_index("name").rename_axis("bus")
     buses = regions.index
