@@ -941,7 +941,18 @@ if __name__ == "__main__":
     if params.cluster_network.get("consider_efficiency_classes", False):
         carriers = []
         for c in aggregate_carriers:
+            # aggregate_carriers is built from both generators and
+            # storage_units carriers (e.g. "battery" exists only in
+            # storage_units), but efficiency classes are a generator-only
+            # concept. For a storage-only carrier, gens is empty and
+            # .quantile() returns NaN -- NaN comparisons are always
+            # False, so `low >= high` silently fails to skip and pd.cut
+            # then breaks on NaN bin edges ("bins must increase
+            # monotonically"). gens.empty must be checked explicitly.
             gens = n.generators.query("carrier == @c")
+            if gens.empty:
+                carriers += [c]
+                continue
             low = gens.efficiency.quantile(0.10)
             high = gens.efficiency.quantile(0.90)
             if low >= high or low.round(2) == high.round(2):

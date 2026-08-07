@@ -201,7 +201,7 @@ clustering:
     algorithm: kmeans # choose from: [hac, kmeans]
     feature: solar+onwind-time
     exclude_carriers: []
-    consider_efficiency_classes: false
+    consider_efficiency_classes: true
   aggregation_strategies:
     generators:
       build_year: 'capacity_weighted_average'
@@ -250,7 +250,17 @@ solving:
       # refer to https://ergo-code.github.io/HiGHS/options/definitions.html#solver
       threads: 4
       solver: "ipm"
-      run_crossover: "off"
+      # "off" caused HiGHS to return status=unknown on a majority of
+      # sampled weeks on the western/33-cluster network, silently
+      # dropping all bus marginal prices (n.buses_t.marginal_price
+      # returned with 0 columns) on exactly the high-load weeks that
+      # matter most. See docs/known-issues.md. "on" resolved every
+      # tested case at comparable wall time on 56-snapshot windows;
+      # full-year/full-network timing impact is not yet verified, and
+      # a separate empty-duals case has since been found even with
+      # crossover on (also documented in known-issues.md) -- treat
+      # this setting as necessary but not proven sufficient.
+      run_crossover: "on"
       small_matrix_value: 1e-6
       large_matrix_value: 1e9
       primal_feasibility_tolerance: 1e-5
