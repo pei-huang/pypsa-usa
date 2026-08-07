@@ -35,9 +35,14 @@ period
 2020-12-01  Wyoming Price of Natural Gas Delivered to Resi...   8.00  $/MCF Wyoming
 """
 
+import hashlib
+import json
 import logging
 import math
+import os
+import re
 from abc import ABC, abstractmethod
+from pathlib import Path
 from typing import ClassVar
 
 import constants
@@ -51,6 +56,40 @@ from urllib3.util import Retry
 logger = logging.getLogger(__name__)
 
 API_BASE = "https://api.eia.gov/v2/"
+
+# Same query is issued once per scenario (e.g. once per planning_horizon,
+# once per interconnect) with an otherwise-identical URL, so a plain
+# disk cache keyed on the URL avoids re-fetching from api.eia.gov.
+# Keyed with the api_key stripped so cache entries stay valid across key
+# rotation and never write a credential into a filename.
+EIA_CACHE_DIR = Path(os.environ.get("EIA_CACHE_DIR", "data/eia_cache"))
+
+
+def _cache_key(url: str) -> str:
+    sanitized = re.sub(r"([?&]api_key=)[^&]+", r"\1", url)
+    return hashlib.sha256(sanitized.encode()).hexdigest()
+
+
+def _read_cache(url: str) -> dict | None:
+    path = EIA_CACHE_DIR / f"{_cache_key(url)}.json"
+    if not path.exists():
+        return None
+    try:
+        with path.open() as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        logger.warning(f"EIA cache entry unreadable, refetching: {path}")
+        return None
+
+
+def _write_cache(url: str, data: dict) -> None:
+    EIA_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    path = EIA_CACHE_DIR / f"{_cache_key(url)}.json"
+    tmp_path = path.with_suffix(".json.tmp")
+    with tmp_path.open("w") as f:
+        json.dump(data, f)
+    tmp_path.replace(path)  # atomic, avoids a torn cache file if interrupted mid-write
+
 
 STATE_CODES = constants.STATE_2_CODE
 
@@ -536,10 +575,21 @@ class DataExtractor(ABC):
     @staticmethod
     def _request_eia_data(url: str) -> dict[str, dict | str]:
         """
-        Retrieves data from EIA API.
+        Retrieves data from EIA API, using a local disk cache.
 
         url in the form of "https://api.eia.gov/v2/" followed by api key and facets
+
+        The same query is often issued once per scenario (e.g. once per
+        planning_horizon or interconnect) with an otherwise-identical URL.
+        Historical EIA data for closed periods does not change, so caching
+        by URL avoids re-fetching it from api.eia.gov every time. Set
+        EIA_CACHE_DIR=/dev/null-equivalent (any non-writable/throwaway path)
+        or delete the cache directory to force a refetch.
         """
+        cached = _read_cache(url)
+        if cached is not None:
+            return cached
+
         # sometimes running into HTTPSConnectionPool error. adding in retries helped
         session = requests.Session()
         retries = Retry(
@@ -551,7 +601,9 @@ class DataExtractor(ABC):
 
         response = session.get(url, timeout=30)
         if response.status_code == 200:
-            return response.json()  # Assumes the response is in JSON format
+            data = response.json()  # Assumes the response is in JSON format
+            _write_cache(url, data)
+            return data
         else:
             logger.error(f"EIA Request failed with status code: {response.status_code}")
             raise requests.ConnectionError(f"Status code {response.status_code}")
