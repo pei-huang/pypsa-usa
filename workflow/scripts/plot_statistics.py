@@ -57,6 +57,29 @@ logger = logging.getLogger(__name__)
 TITLE_SIZE = 16
 
 
+def get_region_column(n: pypsa.Network) -> pd.Series:
+    """
+    Returns the bus-level column used for regional grouping in these plots.
+
+    Falls back to reeds_state when nerc_reg isn't available -- this
+    happens when the network was clustered with
+    topological_boundaries="state" (see cluster_network.py, "nerc_reg
+    was droped in the "state" case"). Prefers nerc_reg where present
+    since it's the more common/finer grouping used elsewhere in the
+    codebase (e.g. transmission ITL costs).
+    """
+    if "nerc_reg" in n.buses.columns:
+        return n.buses.nerc_reg
+    if "reeds_state" in n.buses.columns:
+        logger.warning(
+            "n.buses.nerc_reg not available (network clustered with "
+            "topological_boundaries='state'); falling back to "
+            "reeds_state for regional grouping in plots.",
+        )
+        return n.buses.reeds_state
+    raise KeyError("No usable regional grouping column found on n.buses (looked for nerc_reg, reeds_state).")
+
+
 def create_title(title: str, **wildcards) -> str:
     """
     Standardizes wildcard writing in titles.
@@ -247,10 +270,11 @@ def plot_global_constraint_shadow_prices(
 
 def get_currently_installed_capacity(n: pypsa.Network) -> pd.DataFrame:
     """Returns a DataFrame with the currently installed capacity for each carrier and nerc region."""
-    n.generators["nerc_reg"] = n.generators.bus.map(n.buses.nerc_reg)
+    region_col = get_region_column(n)
+    n.generators["nerc_reg"] = n.generators.bus.map(region_col)
     existing_capacity = n.generators.groupby(["nerc_reg", "carrier"]).p_nom.sum().round(0)
     existing_capacity = existing_capacity.to_frame(name="Existing")
-    n.storage_units["nerc_reg"] = n.storage_units.bus.map(n.buses.nerc_reg)
+    n.storage_units["nerc_reg"] = n.storage_units.bus.map(region_col)
     storage_units = n.storage_units.groupby(["nerc_reg", "carrier"]).p_nom.sum().round(0)
     storage_units = storage_units.to_frame(name="Existing")
     existing_capacity = pd.concat([existing_capacity, storage_units])
@@ -289,10 +313,11 @@ def get_statistics(n, column_name):
     df = df.loc[["Generator", "StorageUnit"]]
 
     # Add nerc_region data
+    region_col = get_region_column(n)
     gens = df.loc["Generator"].index.get_level_values(0)
-    gens_reg = gens.map(n.generators.bus.map(n.buses.nerc_reg)).to_series()
+    gens_reg = gens.map(n.generators.bus.map(region_col)).to_series()
     su = df.loc["StorageUnit"].index.get_level_values(0)
-    su_reg = su.map(n.storage_units.bus.map(n.buses.nerc_reg)).to_series()
+    su_reg = su.map(n.storage_units.bus.map(region_col)).to_series()
     nerc_reg = pd.concat([gens_reg, su_reg])
 
     df = df.set_index(nerc_reg, append=True)
@@ -414,7 +439,7 @@ def plot_regional_emissions_bar(
     save: str,
 ) -> None:
     """PLOT OF CO2 EMISSIONS BY NERC REGION AND INVESTMENT PERIOD."""
-    regional_emisssions_ts = get_node_emissions_timeseries(n).T.groupby(n.buses.nerc_reg).sum().T / 1e6
+    regional_emisssions_ts = get_node_emissions_timeseries(n).T.groupby(get_region_column(n)).sum().T / 1e6
     regional_emissions = (
         regional_emisssions_ts.groupby(regional_emisssions_ts.index.get_level_values(0)).sum().round(3).T
     )
@@ -832,6 +857,23 @@ def plot_region_lmps(
 ) -> None:
     """Plots a box plot of LMPs for each region."""
     df_lmp = n.buses_t.marginal_price
+    if df_lmp.empty or df_lmp.shape[1] == 0:
+        # n.buses_t.marginal_price can come back with zero columns even
+        # on a status=optimal solve -- see docs/known-issues.md, "Empty
+        # duals on an optimal, crossover-on solve (unreproduced)". Skip
+        # rather than crash: this is the only plot that depends on
+        # per-bus duals, and everything else in the network (objective,
+        # dispatch, capacities) is unaffected.
+        logger.warning(
+            "n.buses_t.marginal_price has no columns -- skipping region LMP "
+            "plot. See docs/known-issues.md for the open investigation.",
+        )
+        plt.figure(figsize=(10, 10))
+        plt.title(create_title("LMPs by Region (unavailable)", **wildcards))
+        plt.text(0.5, 0.5, "No marginal price data available for this solve", ha="center", va="center")
+        plt.savefig(save)
+        plt.close()
+        return
     df_long = pd.melt(
         df_lmp.reset_index(),
         id_vars=["timestep"],
